@@ -7,12 +7,21 @@
 //
 
 #import "DLCImagePickerController.h"
-#import "GrayscaleContrastFilter.h"
+#import "DLCGrayscaleContrastFilter.h"
+
+#define kStaticBlurSize 2.0f
 
 @implementation DLCImagePickerController {
+    GPUImageStillCamera *stillCamera;
+    GPUImageOutput<GPUImageInput> *filter;
+    GPUImageOutput<GPUImageInput> *blurFilter;
+    GPUImageCropFilter *cropFilter;
+    GPUImagePicture *staticPicture;
+    UIImageOrientation staticPictureOriginalOrientation;
     BOOL isStatic;
     BOOL hasBlur;
     int selectedFilter;
+    dispatch_once_t showLibraryOnceToken;
 }
 
 @synthesize delegate,
@@ -29,20 +38,37 @@
     filtersBackgroundImageView,
     photoBar,
     topBar,
-    outputJPEGQuality;
+    blurOverlayView,
+    outputJPEGQuality,
+    requestedImageSize;
 
--(id) init {
-    self = [super initWithNibName:@"DLCImagePicker" bundle:nil];
-    
+-(void) sharedInit {
+	outputJPEGQuality = 1.0;
+	requestedImageSize = CGSizeZero;
+}
+
+-(id) initWithNibName:(NSString *)nibNameOrNil bundle:(NSBundle *)nibBundleOrNil {
+    self = [super initWithNibName:nibNameOrNil bundle:nibBundleOrNil];
     if (self) {
-        self.outputJPEGQuality = 1.0;
+        [self sharedInit];
     }
-    
     return self;
 }
 
-- (void)viewDidLoad
-{
+-(id) initWithCoder:(NSCoder *)aDecoder {
+	self = [super initWithCoder:aDecoder];
+	if (self) {
+		[self sharedInit];
+	}
+	return self;
+}
+
+-(id) init {
+    return [self initWithNibName:@"DLCImagePicker" bundle:nil];
+}
+
+-(void)viewDidLoad {
+    
     [super viewDidLoad];
     self.wantsFullScreenLayout = YES;
     //set background color
@@ -59,19 +85,44 @@
     
     staticPictureOriginalOrientation = UIImageOrientationUp;
     
+    self.focusView = [[UIImageView alloc] initWithImage:[UIImage imageNamed:@"focus-crosshair"]];
+	[self.view addSubview:self.focusView];
+	self.focusView.alpha = 0;
+    
+    
+    self.blurOverlayView = [[DLCBlurOverlayView alloc] initWithFrame:CGRectMake(0, 0,
+																				self.imageView.frame.size.width,
+																				self.imageView.frame.size.height)];
+    self.blurOverlayView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    self.blurOverlayView.alpha = 0;
+    [self.imageView addSubview:self.blurOverlayView];
+    
     hasBlur = NO;
     
     [self loadFilters];
     
     //we need a crop filter for the live video
     cropFilter = [[GPUImageCropFilter alloc] initWithCropRegion:CGRectMake(0.0f, 0.0f, 1.0f, 0.75f)];
-    filter = [[GPUImageRGBFilter alloc] init];
+    
+    filter = [[GPUImageFilter alloc] init];
     
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_HIGH, 0), ^{
         [self setUpCamera];
     });
-    
-    
+}
+
+-(void) viewWillAppear:(BOOL)animated {
+    [[UIApplication sharedApplication] setStatusBarHidden:YES withAnimation:UIStatusBarAnimationSlide];
+    [super viewWillAppear:animated];
+}
+
+-(void) viewDidAppear:(BOOL)animated {
+    [super viewDidAppear:animated];
+    if (![UIImagePickerController isSourceTypeAvailable: UIImagePickerControllerSourceTypeCamera]) {
+        dispatch_once(&showLibraryOnceToken, ^{
+            [self switchToLibrary:nil];
+        });
+    }
 }
 
 -(void) loadFilters {
@@ -118,17 +169,7 @@
         stillCamera.outputImageOrientation = UIInterfaceOrientationPortrait;
         runOnMainQueueWithoutDeadlocking(^{
             [stillCamera startCameraCapture];
-            if([stillCamera.inputCamera hasFlash]){
-                [self.flashToggleButton setEnabled:NO];
-                [stillCamera.inputCamera lockForConfiguration:nil];
-                if([stillCamera.inputCamera flashMode] == AVCaptureFlashModeOff){
-                    [self.flashToggleButton setImage:[UIImage imageNamed:@"flash-off"] forState:UIControlStateNormal];
-                }else if([stillCamera.inputCamera flashMode] == AVCaptureFlashModeAuto){
-                    [self.flashToggleButton setImage:[UIImage imageNamed:@"flash-auto"] forState:UIControlStateNormal];
-                }else{
-                    [self.flashToggleButton setImage:[UIImage imageNamed:@"flash"] forState:UIControlStateNormal];
-                }
-                [stillCamera.inputCamera unlockForConfiguration];
+            if([stillCamera.inputCamera hasTorch]){
                 [self.flashToggleButton setEnabled:YES];
             }else{
                 [self.flashToggleButton setEnabled:NO];
@@ -136,9 +177,14 @@
             [self prepareFilter];
         });
     } else {
-        // No camera
-        NSLog(@"No camera");
         runOnMainQueueWithoutDeadlocking(^{
+            // No camera awailable, hide camera related buttons and show the image picker
+            self.cameraToggleButton.hidden = YES;
+            self.photoCaptureButton.hidden = YES;
+            self.flashToggleButton.hidden = YES;
+            // Show the library picker
+//            [self switchToLibrary:nil];
+//            [self performSelector:@selector(switchToLibrary:) withObject:nil afterDelay:0.5];
             [self prepareFilter];
         });
     }
@@ -168,31 +214,31 @@
             [(GPUImageContrastFilter *) filter setContrast:1.75];
         } break;
         case 2: {
-            filter = [[GPUImageToneCurveFilter alloc] initWithACV:@"crossprocess.acv"];
+            filter = [[GPUImageToneCurveFilter alloc] initWithACV:@"crossprocess"];
         } break;
         case 3: {
-            filter = [[GPUImageToneCurveFilter alloc] initWithACV:@"02.acv"];
+            filter = [[GPUImageToneCurveFilter alloc] initWithACV:@"02"];
         } break;
         case 4: {
-            filter = [[GrayscaleContrastFilter alloc] init];
+            filter = [[DLCGrayscaleContrastFilter alloc] init];
         } break;
         case 5: {
-            filter = [[GPUImageToneCurveFilter alloc] initWithACV:@"17.acv"];
+            filter = [[GPUImageToneCurveFilter alloc] initWithACV:@"17"];
         } break;
         case 6: {
-            filter = [[GPUImageToneCurveFilter alloc] initWithACV:@"aqua.acv"];
+            filter = [[GPUImageToneCurveFilter alloc] initWithACV:@"aqua"];
         } break;
         case 7: {
-            filter = [[GPUImageToneCurveFilter alloc] initWithACV:@"yellow-red.acv"];
+            filter = [[GPUImageToneCurveFilter alloc] initWithACV:@"yellow-red"];
         } break;
         case 8: {
-            filter = [[GPUImageToneCurveFilter alloc] initWithACV:@"06.acv"];
+            filter = [[GPUImageToneCurveFilter alloc] initWithACV:@"06"];
         } break;
         case 9: {
-            filter = [[GPUImageToneCurveFilter alloc] initWithACV:@"purple-green.acv"];
+            filter = [[GPUImageToneCurveFilter alloc] initWithACV:@"purple-green"];
         } break;
         default:
-            filter = [[GPUImageRGBFilter alloc] init];
+            filter = [[GPUImageFilter alloc] init];
             break;
     }
 }
@@ -228,11 +274,6 @@
 
 -(void) prepareStaticFilter {
     
-    if (!staticPicture) {
-        // TODO: fix this hack
-        [self performSelector:@selector(switchToLibrary:) withObject:nil afterDelay:0.5];
-    }
-    
     [staticPicture addTarget:filter];
 
     // blur is terminal filter
@@ -264,7 +305,7 @@
     [self.imageView setInputRotation:imageViewRotationMode atIndex:0];
 
     
-    [staticPicture processImage];        
+    [staticPicture processImage];
 }
 
 -(void) removeAllTargets {
@@ -294,27 +335,8 @@
     [self presentViewController:imagePickerController animated:YES completion:NULL];
 }
 
--(IBAction)toggleFlash:(UIButton *)sender{
-    
-    if([UIImagePickerController isSourceTypeAvailable: UIImagePickerControllerSourceTypeCamera]
-       && stillCamera
-       && [stillCamera.inputCamera hasFlash]) {
-        [self.flashToggleButton setEnabled:NO];
-        [stillCamera.inputCamera lockForConfiguration:nil];
-        if([stillCamera.inputCamera flashMode] == AVCaptureFlashModeOff){
-            [stillCamera.inputCamera setFlashMode:AVCaptureFlashModeAuto];
-            [self.flashToggleButton setImage:[UIImage imageNamed:@"flash-auto"] forState:UIControlStateNormal];
-        }else if([stillCamera.inputCamera flashMode] == AVCaptureFlashModeAuto){
-            [stillCamera.inputCamera setFlashMode:AVCaptureFlashModeOn];
-            [self.flashToggleButton setImage:[UIImage imageNamed:@"flash"] forState:UIControlStateNormal];
-        }else{
-            [stillCamera.inputCamera setFlashMode:AVCaptureFlashModeOff];
-            [self.flashToggleButton setImage:[UIImage imageNamed:@"flash-off"] forState:UIControlStateNormal];
-        }
-        [stillCamera.inputCamera unlockForConfiguration];
-        [self.flashToggleButton setEnabled:YES];
-    }
-    
+-(IBAction)toggleFlash:(UIButton *)button{
+    [button setSelected:!button.selected];
 }
 
 -(IBAction) toggleBlur:(UIButton*)blurButton {
@@ -324,60 +346,118 @@
     
     if (hasBlur) {
         hasBlur = NO;
+        [self showBlurOverlay:NO];
         [self.blurToggleButton setSelected:NO];
     } else {
         if (!blurFilter) {
             blurFilter = [[GPUImageGaussianSelectiveBlurFilter alloc] init];
             [(GPUImageGaussianSelectiveBlurFilter*)blurFilter setExcludeCircleRadius:80.0/320.0];
             [(GPUImageGaussianSelectiveBlurFilter*)blurFilter setExcludeCirclePoint:CGPointMake(0.5f, 0.5f)];
-            [(GPUImageGaussianSelectiveBlurFilter*)blurFilter setBlurSize:5.0f];
+            [(GPUImageGaussianSelectiveBlurFilter*)blurFilter setBlurRadiusInPixels:kStaticBlurSize];
             [(GPUImageGaussianSelectiveBlurFilter*)blurFilter setAspectRatio:1.0f];
         }
         hasBlur = YES;
+        CGPoint excludePoint = [(GPUImageGaussianSelectiveBlurFilter*)blurFilter excludeCirclePoint];
+		CGSize frameSize = self.blurOverlayView.frame.size;
+		self.blurOverlayView.circleCenter = CGPointMake(excludePoint.x * frameSize.width, excludePoint.y * frameSize.height);
         [self.blurToggleButton setSelected:YES];
+        [self flashBlurOverlay];
     }
     
     [self prepareFilter];
     [self.blurToggleButton setEnabled:YES];
-    
-    if (isStatic) {
-        [staticPicture processImage];
-    }
 }
 
 -(IBAction) switchCamera {
+    
     [self.cameraToggleButton setEnabled:NO];
     [stillCamera rotateCamera];
     [self.cameraToggleButton setEnabled:YES];
+    
+    if ([UIImagePickerController isSourceTypeAvailable: UIImagePickerControllerSourceTypeCamera] && stillCamera) {
+        if ([stillCamera.inputCamera hasFlash] && [stillCamera.inputCamera hasTorch]) {
+            [self.flashToggleButton setEnabled:YES];
+        } else {
+            [self.flashToggleButton setEnabled:NO];
+        }
+    }
+}
+
+-(void) prepareForCapture {
+    [stillCamera.inputCamera lockForConfiguration:nil];
+    if(self.flashToggleButton.selected &&
+       [stillCamera.inputCamera hasTorch]){
+        [stillCamera.inputCamera setTorchMode:AVCaptureTorchModeOn];
+        [self performSelector:@selector(captureImage)
+                   withObject:nil
+                   afterDelay:0.25];
+    }else{
+        [self captureImage];
+    }
+}
+
+
+-(void)captureImage {
+    
+    void (^completion)(UIImage *, NSError *) = ^(UIImage *img, NSError *error) {
+        
+        [stillCamera.inputCamera unlockForConfiguration];
+        [stillCamera stopCameraCapture];
+        [self removeAllTargets];
+        
+        staticPicture = [[GPUImagePicture alloc] initWithImage:img smoothlyScaleOutput:NO];
+        staticPictureOriginalOrientation = img.imageOrientation;
+        
+        [self prepareFilter];
+        [self.retakeButton setHidden:NO];
+        [self.photoCaptureButton setTitle:@"Done" forState:UIControlStateNormal];
+        [self.photoCaptureButton setImage:nil forState:UIControlStateNormal];
+        [self.photoCaptureButton setEnabled:YES];
+        if(![self.filtersToggleButton isSelected]){
+            [self showFilters];
+        }
+    };
+    
+    
+    AVCaptureDevicePosition currentCameraPosition = stillCamera.inputCamera.position;
+    Class contextClass = NSClassFromString(@"GPUImageContext") ?: NSClassFromString(@"GPUImageOpenGLESContext");
+    if ((currentCameraPosition != AVCaptureDevicePositionFront) || (![contextClass supportsFastTextureUpload])) {
+        // Image full-resolution capture is currently possible just on the final (destination filter), so
+        // create a new paralel chain, that crops and resizes our image
+        [self removeAllTargets];
+        
+        GPUImageCropFilter *captureCrop = [[GPUImageCropFilter alloc] initWithCropRegion:cropFilter.cropRegion];
+        [stillCamera addTarget:captureCrop];
+        GPUImageFilter *finalFilter = captureCrop;
+        
+        if (!CGSizeEqualToSize(requestedImageSize, CGSizeZero)) {
+            GPUImageFilter *captureResize = [[GPUImageFilter alloc] init];
+            [captureResize forceProcessingAtSize:requestedImageSize];
+            [captureCrop addTarget:captureResize];
+            finalFilter = captureResize;
+        }
+        
+        [finalFilter prepareForImageCapture];
+        
+        [stillCamera capturePhotoAsImageProcessedUpToFilter:finalFilter withCompletionHandler:completion];
+    } else {
+        // A workaround inside capturePhotoProcessedUpToFilter:withImageOnGPUHandler: would cause the above method to fail,
+        // so we just grap the current crop filter output as an aproximation (the size won't match trough)
+        UIImage *img = [cropFilter imageFromCurrentlyProcessedOutput];
+        completion(img, nil);
+    }
 }
 
 -(IBAction) takePhoto:(id)sender{
     [self.photoCaptureButton setEnabled:NO];
     
     if (!isStatic) {
-        [stillCamera capturePhotoAsImageProcessedUpToFilter:cropFilter 
-                                      withCompletionHandler:^(UIImage *processed, NSError *error) {
-            isStatic = YES;
-            runOnMainQueueWithoutDeadlocking(^{
-                @autoreleasepool {
-                    [stillCamera stopCameraCapture];
-                    [self removeAllTargets];
-                    [self.retakeButton setHidden:NO];
-                    [self.libraryToggleButton setHidden:YES];
-                    [self.cameraToggleButton setEnabled:NO];
-                    [self.flashToggleButton setEnabled:NO];
-                    staticPicture = [[GPUImagePicture alloc] initWithImage:processed smoothlyScaleOutput:YES];
-                    staticPictureOriginalOrientation = processed.imageOrientation;
-                    [self prepareFilter];
-                    [self.photoCaptureButton setTitle:@"Done" forState:UIControlStateNormal];
-                    [self.photoCaptureButton setImage:nil forState:UIControlStateNormal];
-                    [self.photoCaptureButton setEnabled:YES];
-                    if(![self.filtersToggleButton isSelected]){
-                        [self showFilters];
-                    }
-                }
-            });
-        }];
+        isStatic = YES;
+        
+        [self.libraryToggleButton setHidden:YES];
+        [self.cameraToggleButton setEnabled:NO];
+        [self.flashToggleButton setEnabled:NO];
+        [self prepareForCapture];
         
     } else {
         
@@ -411,7 +491,7 @@
     
     if([UIImagePickerController isSourceTypeAvailable: UIImagePickerControllerSourceTypeCamera]
        && stillCamera
-       && [stillCamera.inputCamera hasFlash]) {
+       && [stillCamera.inputCamera hasTorch]) {
         [self.flashToggleButton setEnabled:YES];
     }
     
@@ -422,7 +502,6 @@
         [self hideFilters];
     }
     
-    cropFilter = [[GPUImageCropFilter alloc] initWithCropRegion:CGRectMake(0.0f, 0.0f, 1.0f, 0.75f)];
     [self setFilter:selectedFilter];
     [self prepareFilter];
 }
@@ -438,27 +517,64 @@
             (GPUImageGaussianSelectiveBlurFilter*)blurFilter;
         
         if ([sender state] == UIGestureRecognizerStateBegan) {
-            //NSLog(@"Start tap");
+            [self showBlurOverlay:YES];
+            [gpu setBlurRadiusInPixels:0.0f];
             if (isStatic) {
                 [staticPicture processImage];
             }
         }
         
         if ([sender state] == UIGestureRecognizerStateBegan || [sender state] == UIGestureRecognizerStateChanged) {
-            //NSLog(@"Moving tap");
-            [gpu setBlurSize:5.0f];
+            [gpu setBlurRadiusInPixels:0.0f];
+            [self.blurOverlayView setCircleCenter:tapPoint];
             [gpu setExcludeCirclePoint:CGPointMake(tapPoint.x/320.0f, tapPoint.y/320.0f)];
         }
         
         if([sender state] == UIGestureRecognizerStateEnded){
-            //NSLog(@"Done tap");
-            [gpu setBlurSize:5.0f];
-            
+            [gpu setBlurRadiusInPixels:kStaticBlurSize];
+            [self showBlurOverlay:NO];
             if (isStatic) {
                 [staticPicture processImage];
             }
         }
     }
+}
+
+- (IBAction) handleTapToFocus:(UITapGestureRecognizer *)tgr{
+	if (!isStatic && tgr.state == UIGestureRecognizerStateRecognized) {
+		CGPoint location = [tgr locationInView:self.imageView];
+		AVCaptureDevice *device = stillCamera.inputCamera;
+		CGPoint pointOfInterest = CGPointMake(.5f, .5f);
+		CGSize frameSize = [[self imageView] frame].size;
+		if ([stillCamera cameraPosition] == AVCaptureDevicePositionFront) {
+            location.x = frameSize.width - location.x;
+		}
+		pointOfInterest = CGPointMake(location.y / frameSize.height, 1.f - (location.x / frameSize.width));
+		if ([device isFocusPointOfInterestSupported] && [device isFocusModeSupported:AVCaptureFocusModeAutoFocus]) {
+            NSError *error;
+            if ([device lockForConfiguration:&error]) {
+                [device setFocusPointOfInterest:pointOfInterest];
+                
+                [device setFocusMode:AVCaptureFocusModeAutoFocus];
+                
+                if([device isExposurePointOfInterestSupported] && [device isExposureModeSupported:AVCaptureExposureModeContinuousAutoExposure]) {
+                    [device setExposurePointOfInterest:pointOfInterest];
+                    [device setExposureMode:AVCaptureExposureModeContinuousAutoExposure];
+                }
+                
+                self.focusView.center = [tgr locationInView:self.view];
+                self.focusView.alpha = 1;
+                
+                [UIView animateWithDuration:0.5 delay:0.5 options:0 animations:^{
+                    self.focusView.alpha = 0;
+                } completion:nil];
+                
+                [device unlockForConfiguration];
+			} else {
+                NSLog(@"ERROR = %@", error);
+			}
+		}
+	}
 }
 
 -(IBAction) handlePinch:(UIPinchGestureRecognizer *) sender {
@@ -468,23 +584,26 @@
             (GPUImageGaussianSelectiveBlurFilter*)blurFilter;
         
         if ([sender state] == UIGestureRecognizerStateBegan) {
-            //NSLog(@"Start tap");
+            [self showBlurOverlay:YES];
+            [gpu setBlurRadiusInPixels:0.0f];
             if (isStatic) {
                 [staticPicture processImage];
             }
         }
         
         if ([sender state] == UIGestureRecognizerStateBegan || [sender state] == UIGestureRecognizerStateChanged) {
-            [gpu setBlurSize:10.0f];
+            [gpu setBlurRadiusInPixels:0.0f];
             [gpu setExcludeCirclePoint:CGPointMake(midpoint.x/320.0f, midpoint.y/320.0f)];
-            CGFloat radius = MIN(sender.scale*[gpu excludeCircleRadius], 0.6f);
+            self.blurOverlayView.circleCenter = CGPointMake(midpoint.x, midpoint.y);
+            CGFloat radius = MAX(MIN(sender.scale*[gpu excludeCircleRadius], 0.6f), 0.15f);
+            self.blurOverlayView.radius = radius*320.f;
             [gpu setExcludeCircleRadius:radius];
             sender.scale = 1.0f;
         }
         
         if ([sender state] == UIGestureRecognizerStateEnded) {
-            [gpu setBlurSize:5.0f];
-
+            [gpu setBlurRadiusInPixels:kStaticBlurSize];
+            [self showBlurOverlay:NO];
             if (isStatic) {
                 [staticPicture processImage];
             }
@@ -507,7 +626,7 @@
     self.filtersBackgroundImageView.hidden = NO;
     [UIView animateWithDuration:0.10
                           delay:0.05
-                        options: UIViewAnimationCurveEaseOut
+                        options: UIViewAnimationOptionCurveEaseOut
                      animations:^{
                          self.imageView.frame = imageRect;
                          self.filterScrollView.frame = sliderScrollFrame;
@@ -530,7 +649,7 @@
     
     [UIView animateWithDuration:0.10
                           delay:0.05
-                        options: UIViewAnimationCurveEaseOut
+                        options: UIViewAnimationOptionCurveEaseOut
                      animations:^{
                          self.imageView.frame = imageRect;
                          self.filterScrollView.frame = sliderScrollFrame;
@@ -554,6 +673,35 @@
     
 }
 
+-(void) showBlurOverlay:(BOOL)show{
+    if(show){
+        [UIView animateWithDuration:0.2 delay:0 options:0 animations:^{
+            self.blurOverlayView.alpha = 0.6;
+        } completion:^(BOOL finished) {
+            
+        }];
+    }else{
+        [UIView animateWithDuration:0.35 delay:0.2 options:0 animations:^{
+            self.blurOverlayView.alpha = 0;
+        } completion:^(BOOL finished) {
+            
+        }];
+    }
+}
+
+
+-(void) flashBlurOverlay {
+    [UIView animateWithDuration:0.2 delay:0 options:0 animations:^{
+        self.blurOverlayView.alpha = 0.6;
+    } completion:^(BOOL finished) {
+        [UIView animateWithDuration:0.35 delay:0.2 options:0 animations:^{
+            self.blurOverlayView.alpha = 0;
+        } completion:^(BOOL finished) {
+            
+        }];
+    }];
+}
+
 -(void) dealloc {
     [self removeAllTargets];
     stillCamera = nil;
@@ -561,11 +709,14 @@
     filter = nil;
     blurFilter = nil;
     staticPicture = nil;
+    self.blurOverlayView = nil;
+    self.focusView = nil;
 }
 
 - (void)viewWillDisappear:(BOOL)animated {
     [stillCamera stopCameraCapture];
     [super viewWillDisappear:animated];
+    [[UIApplication sharedApplication] setStatusBarHidden:NO withAnimation:NO];
 }
 
 #pragma mark - UIImagePickerDelegate
@@ -581,10 +732,11 @@
         staticPicture = [[GPUImagePicture alloc] initWithImage:outputImage smoothlyScaleOutput:YES];
         staticPictureOriginalOrientation = outputImage.imageOrientation;
         isStatic = YES;
-        [self dismissModalViewControllerAnimated:YES];
+        [self dismissViewControllerAnimated:YES completion:nil];
         [self.cameraToggleButton setEnabled:NO];
         [self.flashToggleButton setEnabled:NO];
         [self prepareStaticFilter];
+        [self.photoCaptureButton setHidden:NO];
         [self.photoCaptureButton setTitle:@"Done" forState:UIControlStateNormal];
         [self.photoCaptureButton setImage:nil forState:UIControlStateNormal];
         [self.photoCaptureButton setEnabled:YES];
@@ -596,12 +748,8 @@
 }
 
 - (void)imagePickerControllerDidCancel:(UIImagePickerController *)picker {
-    if (isStatic) {
-        // TODO: fix this hack
-        [self dismissModalViewControllerAnimated:NO];
-        [self.delegate imagePickerControllerDidCancel:self];
-    } else {
-        [self dismissModalViewControllerAnimated:YES];
+    [self dismissViewControllerAnimated:YES completion:nil];
+    if (!isStatic) {
         [self retakePhoto:nil];
     }
 }

@@ -8,6 +8,7 @@
 
 #import <Foundation/Foundation.h>
 #import "GPUImage.h"
+#import "DLCBlurOverlayView.h"
 
 @class DLCImagePickerController;
 
@@ -17,15 +18,7 @@
 - (void)imagePickerControllerDidCancel:(DLCImagePickerController *)picker;
 @end
 
-@interface DLCImagePickerController : UIViewController <UINavigationControllerDelegate,UIImagePickerControllerDelegate> {
-    GPUImageStillCamera *stillCamera;
-    GPUImageOutput<GPUImageInput> *filter;
-    GPUImageOutput<GPUImageInput> *blurFilter;
-    GPUImageCropFilter *cropFilter;
-    GPUImagePicture *staticPicture;
-    UIImageOrientation staticPictureOriginalOrientation;
-    
-}
+@interface DLCImagePickerController : UIViewController <UINavigationControllerDelegate,UIImagePickerControllerDelegate> 
 
 @property (nonatomic, weak) IBOutlet GPUImageView *imageView;
 @property (nonatomic, weak) id <DLCImagePickerDelegate> delegate;
@@ -43,7 +36,10 @@
 @property (nonatomic, weak) IBOutlet UIImageView *filtersBackgroundImageView;
 @property (nonatomic, weak) IBOutlet UIView *photoBar;
 @property (nonatomic, weak) IBOutlet UIView *topBar;
+@property (nonatomic, strong) DLCBlurOverlayView *blurOverlayView;
+@property (nonatomic, strong) UIImageView *focusView;
 
 @property (nonatomic, assign) CGFloat outputJPEGQuality;
+@property (nonatomic, assign) CGSize requestedImageSize;
 
 @end
