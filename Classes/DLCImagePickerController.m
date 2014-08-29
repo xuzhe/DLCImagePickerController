@@ -267,9 +267,6 @@
     } else {
         [filter addTarget:self.imageView];
     }
-    
-    [filter prepareForImageCapture];
-    
 }
 
 -(void) prepareStaticFilter {
@@ -437,13 +434,12 @@
             finalFilter = captureResize;
         }
         
-        [finalFilter prepareForImageCapture];
-        
         [stillCamera capturePhotoAsImageProcessedUpToFilter:finalFilter withCompletionHandler:completion];
     } else {
         // A workaround inside capturePhotoProcessedUpToFilter:withImageOnGPUHandler: would cause the above method to fail,
         // so we just grap the current crop filter output as an aproximation (the size won't match trough)
-        UIImage *img = [cropFilter imageFromCurrentlyProcessedOutput];
+//        [cropFilter useNextFrameForImageCapture];
+        UIImage *img = [cropFilter imageFromCurrentFramebuffer];
         completion(img, nil);
     }
 }
@@ -471,7 +467,7 @@
         
         [staticPicture processImage];
         
-        UIImage *currentFilteredVideoFrame = [processUpTo imageFromCurrentlyProcessedOutputWithOrientation:staticPictureOriginalOrientation];
+        UIImage *currentFilteredVideoFrame = [processUpTo imageFromCurrentFramebufferWithOrientation:staticPictureOriginalOrientation];
 
         NSDictionary *info = [[NSDictionary alloc] initWithObjectsAndKeys:
                               UIImageJPEGRepresentation(currentFilteredVideoFrame, self.outputJPEGQuality), @"data", nil];
