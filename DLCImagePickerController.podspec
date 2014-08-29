@@ -1,6 +1,6 @@
 Pod::Spec.new do |s|
   s.name         = "DLCImagePickerController"
-  s.version      = "0.0.1"
+  s.version      = "0.0.2"
   s.summary      = "ImagePickerController with live filters, radial blur and more. Brought to you by the fine ladies and gents at Backspaces."
   s.description  = <<-DESC
                     DLCImagePickerController is a fast, beautiful and fun way to filter and capture your photos with OpenGL and your iPhone.
@@ -9,8 +9,8 @@ Pod::Spec.new do |s|
   s.homepage     = "www.backspac.es"
   s.license      = 'BSD'
   s.author       = { "Dmitri Cherniak" => "dmitric@gmail.com" }
-  s.source       = { :git => "https://github.com/gobackspaces/DLCImagePickerController.git", :tag => "0.0.1" }
-  s.platform     = :ios, '5.0'
+  s.source       = { :git => "https://github.com/gobackspaces/DLCImagePickerController.git"}
+  s.platform     = :ios, '6.0'
   s.requires_arc = true
   s.framework    = 'AssetsLibrary'
 
